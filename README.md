@@ -1,9 +1,11 @@
 # Stellar Observer (Atlas)
 
+An interactive sky atlas that renders real-time views of the night sky with constellation boundaries, star positions, and interactive zoom/pan capabilities.
+
 Stellar Observer consists of two cleanly separated parts:
 
-1. **Python data builder** – generates static JSON datasets (stars, lines, boundaries).
-2. **Static web frontend** – renders an interactive sky atlas from those datasets.
+1. **Python data builder** — generates static JSON datasets (stars, lines, boundaries).
+2. **Static web frontend** — renders an interactive sky atlas from those datasets.
 
 Python runs once and exits. The browser only reads JSON.
 There is no runtime coupling between Python and JavaScript.
@@ -162,14 +164,33 @@ Arguments:
 The frontend is a **pure visualization layer**.
 It never fetches astronomy data from the network.
 
+### Architecture Overview
+
+The frontend uses a modular ES6 architecture with clear separation of concerns:
+
+```
+app.js           → Application bootstrap, event handlers, orchestration
+constants.js     → Configuration, observer location, constellation mappings
+sky_engine.js    → Coordinate transformations, state management, calculations
+rendering.js     → All SVG/DOM manipulation, visual output
+ui.js            → UI panels, controls, status messages
+```
+
+---
+
 ### `index.html`
 Static HTML shell (layout + CSS + JS module entrypoint).
 Contains minimal logic - just structure and style imports.
 
 Key features:
-- SVG canvas with clipping paths for horizon
-- Layered rendering (grid, boundaries, lines, stars)
-- Responsive layout with split-screen (atlas | dashboard)
+- SVG canvas with clipping paths for horizon circle
+- Layered rendering architecture:
+  - `gridLayer`: Compass directions (N/S/E/W)
+  - `boundaryLayer`: IAU constellation boundaries
+  - `linesLayer`: Constellation stick figures
+  - `starLayer`: Individual star points
+- Responsive split-screen layout (atlas | dashboard)
+- Camera transform group for pan/zoom
 - Module script import for ES6 modules
 
 ---
@@ -183,197 +204,202 @@ Uses CSS custom properties for theming:
 - `--star-gold`: Star color for catalog stars
 - `--const-pink`: Constellation highlight color
 
-Key animations:
-- `.const-line`: 12-second line drawing animation using `stroke-dashoffset`
-- `.boundary-path.highlighted`: Pink highlight on hover/focus
-- Smooth transitions on star size and opacity
+Key styling features:
+- `.boundary-path`: Constellation boundaries with hover highlights
+- `.const-line`: Animated line drawing using `stroke-dashoffset`
+- `.star-point`: Star rendering with hover transitions
+- `.focus-panel`: Active state styling for info panels
+- GPU-accelerated transforms for smooth pan/zoom
 
 ---
 
 ### `js/constants.js`
 Frontend configuration constants.
 
-Observer location:
+**Observer Location:**
 - `OBSERVER_LATITUDE`: -36.8485 (Auckland, NZ)
 - `OBSERVER_LONGITUDE`: 174.7633
 - `OBSERVER_ELEVATION`: 0 meters
 
-SVG geometry:
+**SVG Geometry:**
 - `SVG_CENTER`: 500 (center of 1000×1000 canvas)
 - `SVG_RADIUS`: 450 (horizon circle)
 
-Constellation mappings:
+**Constellation Mappings:**
 - `CONSTELLATION_FULL_NAMES`: 3-letter codes → full names
 - `normalizeConstellationId()`: Handles variants (Ser1/Ser2 → Ser, PSA → PsA)
+- `getConstellationDisplayName()`: Returns full name with fallback
 
-Rendering thresholds:
-- `MIN_ALTITUDE_DEGREES`: 3.0 (stars below ignored)
+**Rendering Thresholds:**
+- `MIN_ALTITUDE_DEGREES`: 3.0 (stars below horizon ignored)
 - `DEFAULT_MAX_MAGNITUDE`: 5.0
-- `FOCUS_MODE_MAGNITUDE`: 6.0 (shows all stars in focus)
 - `LINE_WRAP_THRESHOLD`: 400px (detects projection artifacts)
+- `BOUNDARY_GAP_THRESHOLD`: 300px (boundary segment splitting)
 
 ---
 
 ### `js/ui.js`
-UI-only logic - handles all DOM updates.
+UI-only logic - handles all DOM updates without astronomy calculations.
 
-No astronomy math lives here.
-
-Key functions:
+**Status Management:**
 - `updateStatus(type, message)`: Status indicator (loading/connected/error)
-- `updateStarFocusPanel(star)`: Populate star info panel
-- `updateConstellationFocusPanel(constId)`: Populate constellation info
-- `renderStarTable(stars, onRowHover, onRowLeave)`: Renders top 100 visible stars
-- `setLocalTime()`: Initialize time picker to current local time
-- `debugLog(message, type)`: Developer console logging
+- `showManualLoadPrompt()`: Display file picker for blocked auto-load
+- `hideManualLoadPrompt()`: Remove file picker when data loads
 
-Handles:
-- Focus panels (star and constellation info)
-- Star table with search filtering
-- Time and magnitude controls
-- Debug console toggle
-- Manual file upload interface
+**Focus Panels:**
+- `updateStarFocusPanel(star)`: Populate star info (name, magnitude, position)
+- `updateConstellationFocusPanel(constId)`: Populate constellation info
+- `clearStarFocusPanel()`: Reset star panel to default state
+- `clearConstellationFocusPanel()`: Reset constellation panel
+
+**Controls:**
+- `setLocalTime()`: Initialize time picker to 10 PM local time
+- `getCurrentTime()`: Read current time from datetime picker
+- `getCurrentMagnitudeLimit()`: Read magnitude filter value
+
+**Debug Console:**
+- `debugLog(message, type)`: Developer console with color coding
+- `toggleConsole(forceOpen)`: Show/hide debug output
 
 ---
 
-### `js/sky_view.js`
-Astronomy and rendering engine (the core logic).
+### `js/sky_engine.js`
+Core astronomy calculations and state management.
 
-#### **State Management**
-- `SkyViewState` class: Manages application state
-  - Raw catalog data (stars, boundaries, lines)
-  - Visible stars and geometry
-  - Focus mode state
-  - Astronomy Engine observer
+**State Management:**
+- `SkyViewState` class: Central application state
+  - `rawStars`, `rawBoundaries`, `rawLines`: Loaded catalog data
+  - `visibleStars`: Filtered and processed stars for current view
+  - `starsById`: Map for quick star lookup by HIP ID
+  - `observer`: Astronomy Engine observer object
+  - `transform`: Camera state `{x, y, k}` for pan/zoom
+  - `lastHighlightedStarId`: Hover state tracking
 
-#### **Coordinate Transformations**
+**Coordinate Transformations:**
+- `projectToSVG(altitude, azimuth)`: Maps Alt/Az → SVG coordinates
+  - Azimuthal equidistant projection centered on zenith
+  - South-up orientation (South at top, consistent with Auckland view)
+- `svgToHorizontal(x, y)`: Inverse projection SVG → Alt/Az
+- `equatorialToHorizontal(date, ra, dec)`: RA/Dec → Alt/Az using Astronomy Engine
+- `horizontalToEquatorial(date, alt, az)`: Alt/Az → RA/Dec (for sky queries)
 
-**Three coordinate systems:**
+**View Calculation:**
+- `calculateView()`: Main calculation pipeline
+  1. Get current time and magnitude limit
+  2. Transform all stars from RA/Dec → Alt/Az → SVG
+  3. Filter by horizon (altitude ≥ 3°) and magnitude
+  4. Build `starsById` map for constellation line rendering
+  5. Sort by magnitude (brightest first)
+  6. Does NOT render - only updates state
 
-1. **Equatorial (RA/Dec)**: Celestial coordinates from catalog
-2. **Horizontal (Alt/Az)**: Observer-centric coordinates
-   - `equatorialToHorizontal(date, raHours, decDegrees)`: Uses Astronomy Engine
-3. **SVG (x, y)**: Screen pixel coordinates
-   - `projectToSVG(altitude, azimuth)`: Azimuthal equidistant projection
+**Transform Management:**
+- `setTransform(x, y, k)`: Update camera position and apply to DOM
+  - Updates SVG transform attribute for smooth pan/zoom
+  - Dynamically adjusts star size scaling (`--zoom-growth`)
+  - Controls constellation line opacity (fades in at k > 1.5)
 
-**Projection details:**
-- Zenith (90° altitude) → center (500, 500)
-- Horizon (0° altitude) → circle edge (radius 450)
-- Azimuth 0° (North) → top, 90° (East) → right
+---
 
-#### **Rendering Functions**
+### `js/rendering.js`
+All SVG and DOM manipulation - the visual output layer.
 
-**Stars:**
-- `renderStars(stars, scaleFactor)`: Creates `<circle>` elements
-- Size based on magnitude: `radius = max(1.5, 6 - magnitude)`
-- Color: white for proper names, gold for catalog stars
-- Opacity scales with magnitude
-- In focus mode: 1.5× larger
+**Main Render Function:**
+- `renderView()`: Complete rendering pipeline
+  1. Render stars with magnitude-based sizing
+  2. Render constellation boundaries with wraparound handling
+  3. Render constellation lines with distance filtering
+  4. Update layer visibility based on toggles
+  5. Refresh star table
 
-**Boundaries:**
-- `renderBoundaries(date, scaleFactor)`: Creates `<path>` elements for constellation polygons
-- `computeBoundarySegments(points, date)`: 
-  - Converts RA/Dec → Alt/Az → SVG
-  - Detects discontinuities (horizon crossing, RA wraparound)
-  - Splits into continuous segments
-  - **Adaptive densification**: Interpolates points if screen distance > 20px (prevents gaps)
-- Hover interaction: Highlights boundaries in pink
+**Star Rendering:**
+- `renderStars(stars)`: Create SVG line elements for stars
+  - Uses `<line>` with `stroke-linecap="round"` for circular appearance
+  - Dynamic sizing based on magnitude (brighter = larger)
+  - White color for proper names, gold for catalog stars
+  - Hover handlers for highlighting and info panels
+  - Scale adjustment via CSS custom property for zoom
+
+**Boundary Rendering:**
+- `renderBoundaries(date)`: Draw IAU constellation boundaries
+- `computeBoundarySegments(points, date)`: Smart segmentation
+  - Detects RA wraparound (0h ↔ 24h) using distance thresholds
+  - Handles zenith discontinuities with azimuth jump detection
+  - Splits boundaries into continuous segments
+- `createBoundaryPath(segment, constId)`: Generate SVG path elements
 
 **Constellation Lines:**
-- `renderConstellationLines(constId, scaleFactor)`: Creates `<line>` elements
-- Only rendered in focus mode
-- Wraparound detection: Skips lines > 400px (projection artifacts)
-- Animated drawing effect via CSS `stroke-dashoffset`
+- `renderConstellationLines()`: Draw stick figures
+  - Connects stars by HIP ID pairs from `lines.json`
+  - Distance filtering prevents wraparound artifacts (> 400px = skip)
+  - Uses `vector-effect: non-scaling-stroke` for consistent width
+  - Animated line drawing with `stroke-dasharray` CSS
+  - Opacity controlled by zoom level (hidden at k ≤ 1.5)
 
-#### **View Modes**
+**Star Table:**
+- `renderStarTable()`: Populate visible stars list
+  - Search filtering by name, Bayer designation, constellation
+  - Live star count display
+  - Row hover triggers star highlighting on map
+  - Formatted magnitude, altitude/azimuth display
 
-**Atlas Mode:**
-- Full sky view, viewBox `"0 0 1000 1000"`
-- Shows all visible stars above MIN_ALTITUDE
-- Hover: Preview constellation boundaries
-- Click: Enter focus mode
-
-**Focus Mode:**
-- Zooms to single constellation
-- **Orientation preservation**: 
-  - Calculates constellation's average azimuth
-  - Rotates view: `rotation = 90 - azimuth`
-  - Result: Horizon direction appears at bottom (as if looking at that part of sky)
-- ViewBox: Centered on constellation with padding
-- Scale factor: Adjusts line/star sizes for zoom level
-- Shows constellation lines with draw animation
-- Forces magnitude to 6.0 (all stars visible)
-
-**Rotation logic:**
-- Azimuth 0° (North) → rotate 90° (north at bottom, as if facing north)
-- Azimuth 90° (East) → rotate 0° (east at right, as if facing east)
-- Azimuth 180° (South) → rotate -90° (south at bottom, as if facing south)
-
-#### **Interaction Utilities**
-- `svgPointFromEvent(evt)`: Mouse → SVG coordinates
-- `isInsideHorizon(point)`: Boundary check
-- `pointInPolygon(point, polygon)`: Ray casting hit test
-- `findConstellationAtPoint(point)`: Identifies constellation under cursor
+**Highlight System:**
+- `highlightStar(star)`: Emphasize star on hover
+  - Change color to sky blue
+  - Scale up using CSS transform (prevents layout shift)
+  - Update info panels with star and constellation data
+- `resetFocus()`: Clear all highlights and info panels
 
 ---
 
 ### `js/app.js`
-Application bootstrap and controller.
+Application bootstrap, event handlers, and main controller.
 
-#### **Data Loading**
-- Fetches `stars.json`, `boundaries.json`, `lines.json`
-- Falls back to manual file picker if auto-load blocked (file:// protocol)
-- Initializes Astronomy Engine observer with location
+**Data Loading:**
+- `loadData()`: Asynchronous JSON file loading
+  - Attempts auto-load via fetch (blocked in `file://` protocol)
+  - Graceful fallback to manual file picker
+  - Status updates and debug logging
+- `handleManualFiles(files)`: Process user-uploaded JSON files
+  - FileReader API for local file reading
+  - Intelligent filename detection (stars/boundaries/lines)
 
-#### **Main Rendering Loop**
+**Interactive Camera:**
+- **Wheel Handler**: Zoom towards cursor position
+  - Exponential scaling for smooth feel
+  - Zoom limits: 1.0x (full view) to 5.0x (deep zoom)
+  - Circular bounds enforcement to prevent panning outside horizon
+- **Mouse Drag**: Pan the sky view
+  - Only active when zoomed (k > 1.01)
+  - Tracks drag delta and applies to transform
+  - Cursor changes: `grab` ↔ `grabbing`
+  - Circular bounds prevent escaping visible area
 
-`calculateView()` - Called on every update:
+**Circular Bounds:**
+- `applyCircularBounds(x, y, k)`: Constraint enforcement
+  - Calculates viewport center in world space
+  - Measures distance from atlas center
+  - Clamps to effective radius (shrinks as you zoom)
+  - Prevents "empty space" viewing
 
-1. Get current time and magnitude limit
-2. **For each star in catalog:**
-   - Convert RA/Dec → Alt/Az (for current time/location)
-   - Project Alt/Az → SVG x,y
-   - Check if above horizon (altitude ≥ 3°)
-   - Check if bright enough (magnitude ≤ limit)
-3. **Filter visible stars**
-   - Atlas mode: Stars above horizon AND bright enough
-   - Focus mode: Stars in constellation (regardless of horizon) AND bright enough
-4. **Render based on mode:**
-   - `renderAtlasMode(stars, date)`: Full sky view
-   - `renderFocusMode(stars, date)`: Zoomed constellation view
-5. Update star table with visible objects
+**Grid Management:**
+- `drawGrid()`: Render compass directions (N/S/E/W)
+  - Static background layer with horizon circle
+  - Cardinal direction labels at circle edge
+- `toggleGrid()`: Show/hide grid layer
 
-#### **Atlas Mode Rendering**
-- Reset viewBox to full canvas
-- Clear all transforms
-- Hide constellation lines
-- Render stars and boundaries at 1.0 scale
-- Show/hide grid based on toggle
+**Global Functions:**
+- `window.calculateView`: Exposed for refresh button
+- `window.adjustMagnitude(delta)`: ±1 magnitude control with debouncing
+- `window.adjustTime(deltaHours)`: Time offset controls (±1 hour)
+- `window.filterTable`: Exposed for search input
+- `window.toggleConsole`: Debug console toggle
 
-#### **Focus Mode Rendering**
-1. Calculate constellation center (average boundary position)
-2. Calculate extent (maximum distance from center)
-3. Create zoomed viewBox centered on constellation
-4. Calculate rotation angle based on azimuth
-5. Apply rotation transform to all layers
-6. Render with scaled elements
-7. Show constellation lines with animation
-8. Update focus panel
-
-#### **Event Handlers**
-- **Mouse move**: Hit-test boundaries, highlight on hover
-- **Click**: Enter focus mode for hovered constellation
-- **Table row hover**: Highlight corresponding star on map
-- **Time/magnitude change**: Trigger `calculateView()`
-- **Grid/boundary toggles**: Show/hide layers
-
-#### **Global Functions** (exposed via `window`)
-- `calculateView()`: Refresh view
-- `exitConstellationMode()`: Return to atlas
-- `handleManualFiles(input)`: Process uploaded JSON files
-- `toggleGrid()`: Show/hide coordinate grid
-- `filterTable()`: Search star table
-- `toggleConsole()`: Show/hide debug log
+**Initialization:**
+- Checks for Astronomy Engine library
+- Creates observer object for location
+- Loads data and renders initial view
+- Attaches all event listeners
+- Sets up layer toggle handlers
 
 ---
 
@@ -382,7 +408,7 @@ Application bootstrap and controller.
 The frontend expects these files next to `index.html`:
 
 | File | Required | Purpose | Size |
-|----|----|----|---|
+|------|----------|---------|------|
 | `stars.json` | Yes | Star positions, magnitudes, names | ~500 KB |
 | `lines.json` | Optional | Constellation line segments | ~20 KB |
 | `boundaries.json` | Optional | IAU constellation boundaries | ~300 KB |
@@ -440,7 +466,7 @@ Missing optional files simply disable those layers.
 ## Coordinate Conventions
 
 | Quantity | Units | Notes |
-|----|----|---|
+|----------|-------|-------|
 | Star RA (`r`) | hours (0-24) | Required by Astronomy Engine |
 | Star Dec (`d`) | degrees (-90 to +90) | Standard |
 | Boundary RA | hours (0-24) | Consistent with stars |
@@ -453,14 +479,20 @@ Missing optional files simply disable those layers.
 - Astronomy Engine library expects hours
 - Conversion: `RA_degrees / 15 = RA_hours`
 
+**Projection Details:**
+- Azimuthal equidistant projection (like looking up at the sky)
+- Zenith at center, horizon at edge
+- South-up orientation (South at top for Southern Hemisphere observers)
+- Distance from center = (90° - altitude) / 90° × radius
+
 ---
 
 ## Architecture Principles
 
 ### **Separation of Concerns**
 - Python: Heavy computation (catalog processing, precession, SIMBAD queries)
-- JavaScript: Real-time rendering (time updates every second)
-- No runtime coupling: Data files are static
+- JavaScript: Real-time rendering (60 FPS interaction, time updates)
+- No runtime coupling: Data files are static, no server required
 
 ### **Data Flow**
 ```
@@ -468,30 +500,43 @@ Raw Catalogs (Hipparcos, SIMBAD, Stellarium, IAU)
     ↓ Python Pipeline
 JSON Files (stars, lines, boundaries)
     ↓ Browser Fetch
-JavaScript State (raw data)
-    ↓ Astronomy Engine
+JavaScript State (skyState object)
+    ↓ Astronomy Engine + calculateView()
 Transformed Coordinates (Alt/Az → SVG)
-    ↓ Rendering
+    ↓ renderView()
 SVG DOM Elements (visible to user)
 ```
 
 ### **Coordinate Transformations**
 ```
 RA/Dec (catalog) → Alt/Az (observer) → x,y (screen)
-     ↑                   ↑                   ↑
+     ↓                   ↓                   ↓
   J2000 epoch      Time-dependent    Azimuthal projection
+                   Observer-dependent  (South-up orientation)
 ```
 
-### **Two-Stage Rendering**
-1. **Atlas mode**: Overview, exploration, constellation discovery
-2. **Focus mode**: Detail, learning, true sky orientation
+### **Camera System**
+- **World Space**: Fixed 1000×1000 SVG coordinate system (stars, boundaries, lines)
+- **Camera Transform**: `translate(x, y) scale(k)` applied to container group
+- **Zoom Range**: 1.0x (full sky) to 5.0x (detailed view)
+- **Circular Bounds**: Prevents panning outside visible horizon circle
+- **Dynamic Scaling**: Stars and lines adjust size/opacity based on zoom level
+
+### **Rendering Strategy**
+- **Single View Mode**: No separate atlas/focus modes (simplified from original design)
+- **Layer Visibility**:
+  - Grid: Toggle-able compass overlay
+  - Boundaries: Toggle-able, always rendered when enabled
+  - Lines: Dynamically fade in during zoom (k > 1.5)
+  - Stars: Always visible, size scales with zoom
+- **Performance**: Full re-render on time/magnitude changes, transform-only on pan/zoom
 
 ### **LLM-Friendly Design**
 - Balanced file sizes (150-400 lines per file)
-- Explicit dependencies (no magic globals)
+- Explicit dependencies (ES6 imports, no magic globals)
 - Self-documenting names and rich docstrings
-- Type hints in Python for predictability
-- Clear separation between modules
+- Clear separation between modules (calculation vs rendering vs UI)
+- Minimal coupling (modules communicate via skyState)
 
 ---
 
@@ -504,7 +549,7 @@ pip install -r requirements.txt
 # Build atlas data
 python -m atlas_builder.cli --out web
 
-# Serve locally
+# Serve locally (required for auto-load to work)
 python -m http.server --directory web 8000
 
 # Open browser
@@ -516,6 +561,11 @@ open http://localhost:8000
 - `web/lines.json`: Constellation stick figures
 - `web/boundaries.json`: 88 constellation boundaries
 - `web/names_cache.json`: SIMBAD query cache (reused on subsequent builds)
+
+**First-time build notes:**
+- SIMBAD queries may take 5-10 minutes (cached for future builds)
+- Internet connection required for downloads
+- Astropy recommended for accurate boundary precession
 
 ---
 
@@ -553,17 +603,22 @@ BOUNDARY_DENSIFICATION_STEPS = 10  # Higher = smoother (larger file)
 ## Known Limitations & Edge Cases
 
 ### Handled Edge Cases
-1. **RA wraparound (0h ↔ 24h)**: Boundary splitting logic prevents lines across sky
-2. **Serpens constellation split**: Detected as large gap, renders as two regions
-3. **Polar regions**: Zenith detection prevents bad azimuth jumps
-4. **Constellation line artifacts**: Distance check prevents projection errors
-5. **Southern hemisphere**: Works identically (no special casing needed)
+1. **RA wraparound (0h ↔ 24h)**: Boundary distance checks prevent lines across sky
+2. **Serpens constellation split**: Large gap detection renders as two regions
+3. **Polar regions**: Azimuth jump detection prevents bad boundary segments
+4. **Constellation line artifacts**: Distance threshold prevents projection errors (>400px)
+5. **Southern hemisphere**: Works identically (South-up orientation is natural)
+6. **Zoom bounds**: Circular constraint prevents panning outside horizon
+7. **File protocol blocks**: Graceful fallback to manual file picker
 
 ### Current Limitations
 1. **Mobile support**: Desktop-optimized UI, touch gestures not implemented
 2. **Time zones**: Uses browser local time (no explicit timezone selection)
 3. **Precession**: Without Astropy, boundaries use B1875 coords (acceptable for visualization)
-4. **Performance**: Renders all stars every frame (not virtualized)
+4. **Performance**: Re-renders all elements on view changes (not virtualized)
+5. **Orientation**: Fixed South-up view (no rotation controls)
+6. **Deep sky objects**: Only stars from Hipparcos catalog
+7. **Planets**: Not included (would require ephemeris calculations)
 
 ---
 
@@ -575,56 +630,134 @@ BOUNDARY_DENSIFICATION_STEPS = 10  # Higher = smoother (larger file)
 - Lines: ~800 segments, ~20 KB JSON
 
 **Rendering:**
-- Atlas mode: ~1,000 stars visible (magnitude ≤ 5.0)
-- Focus mode: ~50-200 stars per constellation
+- Visible stars: ~1,000 (magnitude ≤ 5.0 default)
 - Frame rate: 60 FPS on modern hardware
-- Initial load: ~1 second (cache enabled)
+- Initial load: ~1 second (with cache enabled)
+- Pan/zoom: GPU-accelerated CSS transforms
 
 **Memory:**
 - Total bundle: ~1 MB (HTML + CSS + JS + JSON)
 - Runtime: ~10-20 MB (DOM + state)
+
+**Browser compatibility:**
+- Modern browsers with ES6 module support
+- Chrome 61+, Firefox 60+, Safari 11+, Edge 79+
+- Astronomy Engine: IE11 not supported
 
 ---
 
 ## Troubleshooting
 
 **"Auto-load blocked" message:**
-- Browser security prevents loading local JSON files
-- Use manual file picker or run a local web server
+- Browser security prevents loading local JSON files via `file://` protocol
+- **Solution**: Use manual file picker or run a local web server
+- Recommended: `python -m http.server --directory web 8000`
 
 **Constellation lines missing:**
 - Ensure `lines.json` exists in `web/` directory
 - Check `STELLARIUM_SKYCULTURE` setting in config
+- Verify lines fade in when zoomed (k > 1.5)
 
 **Stars appear at wrong positions:**
 - Verify observer location in `constants.js`
-- Check system time is correct
+- Check system time is correct (browser uses local time)
+- Ensure Astronomy Engine library loaded (check browser console)
 
 **Boundaries have gaps:**
 - Increase `BOUNDARY_DENSIFICATION_STEPS` in config
 - Check Astropy is installed for accurate precession
+- Gaps near zenith are normal for some constellations
 
 **SIMBAD queries failing:**
 - Check internet connection
 - Cached names in `names_cache.json` will be reused
 - Build can complete without names (stars labeled "HIP XXXXX")
 
+**Pan/zoom not working:**
+- Check browser console for JavaScript errors
+- Verify SVG `cameraGroup` element exists
+- Ensure wheel event listener attached (check with DevTools)
+
+**Slow performance:**
+- Reduce `MAX_MAGNITUDE` to show fewer stars
+- Check browser hardware acceleration is enabled
+- Try disabling constellation lines/boundaries
+
 ---
 
 ## Future Enhancements (Not Implemented)
 
+**User Experience:**
 - Mobile-optimized UI with touch gestures
-- Pinch-to-zoom and pan in atlas mode
-- Location picker with geolocation
+- Pinch-to-zoom and two-finger pan
+- Location picker with geolocation API
 - Time-lapse animation (watch sky rotate)
+- North-up/South-up orientation toggle
+- Keyboard shortcuts for power users
+
+**Content:**
 - Deep sky objects (Messier, NGC catalogs)
 - Planetary positions (using Astronomy Engine ephemeris)
+- Solar system objects (Moon, Sun, visible planets)
 - Constellation mythology/information panels
-- AR mode (point phone at sky, overlay constellations)
-- Export current view as image
-- Keyboard shortcuts for power users
+- Star labels at high zoom levels
+
+**Features:**
+- AR mode (overlay on phone camera)
+- Export current view as image/PDF
+- Custom observer locations per-session
+- Telescope control integration
+- Light pollution overlay
+- Cloud cover warnings
+
+**Technical:**
+- WebGL rendering for 10,000+ stars
+- Virtualized star table (render only visible rows)
+- Service worker for offline use
+- Progressive Web App (PWA) support
+- Internationalization (i18n)
 
 ---
 
-Design goal: explicit data flow, stable schemas, and code that remains understandable
-to both humans and LLMs.
+## Design Philosophy
+
+**Explicit over implicit:**
+- Clear data flow, stable schemas
+- No hidden state or magic globals
+- Dependencies declared via ES6 imports
+
+**Separation of concerns:**
+- Each module has a single, well-defined responsibility
+- Astronomy calculations isolated from rendering
+- UI updates isolated from data processing
+
+**LLM-friendly codebase:**
+- Rich documentation and inline comments
+- Self-describing function and variable names
+- Consistent patterns across modules
+- Predictable file structure
+
+**Performance by design:**
+- GPU-accelerated transforms for pan/zoom
+- Efficient SVG rendering with `vector-effect`
+- Minimal DOM updates during interaction
+- Lazy-loaded constellation lines (zoom-dependent)
+
+**Goal**: Code that remains understandable to both humans and LLMs, with clean boundaries and predictable behavior.
+
+---
+
+## License & Attribution
+
+**Data Sources:**
+- Hipparcos Catalog: ESA, via Skyfield
+- SIMBAD: CDS, Strasbourg
+- Stellarium Constellation Lines: Stellarium Astronomy Software (GPL)
+- IAU Constellation Boundaries: CDS `constbnd.dat`
+
+**Libraries:**
+- Astronomy Engine (Eric Dose): MIT License
+- Skyfield (Brandon Rhodes): MIT License
+- Astropy: BSD 3-Clause License
+
+This project is provided as-is for educational and personal use.
